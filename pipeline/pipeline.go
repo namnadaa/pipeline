@@ -3,12 +3,19 @@ package pipeline
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// Настройка логгера, чтобы писать в консоль с уровнем Info
+func init() {
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
+	slog.SetDefault(slog.New(handler))
+}
 
 // Интервал очистки кольцевого буфера
 const bufferDrainInterval time.Duration = 10 * time.Second
@@ -97,16 +104,24 @@ func Read(nextStage chan<- int, done chan struct{}) {
 	for scanner.Scan() {
 		data = scanner.Text()
 		if strings.EqualFold(data, "exit") {
-			fmt.Println("Программа завершила работу")
+			slog.Info("Программа завершила работу по команде пользователя")
 			close(done)
 			return
 		}
+
 		n, err := strconv.Atoi(data)
 		if err != nil {
 			fmt.Println("Доступен ввод только целых чисел")
+			slog.Warn("Попытка ввода нечислового значения", "input", data)
 			continue
 		}
+
+		slog.Debug("Пользователь ввел число", "value", n)
 		nextStage <- n
+	}
+
+	if err := scanner.Err(); err != nil {
+		slog.Error("Ошибка чтения с консоли", "error", err)
 	}
 }
 
@@ -120,16 +135,25 @@ func NegativeFilterStage(prevStage <-chan int, done <-chan struct{}) <-chan int 
 			select {
 			case data, ok := <-prevStage:
 				if !ok {
+					slog.Warn("Канал предыдущей стадии закрыт", "stage", "NegativeFilter")
 					return
 				}
+
+				slog.Debug("Получено число", "stage", "NegativeFilter", "value", data)
+
 				if data >= 0 {
 					select {
 					case nextStage <- data:
+						slog.Info("Число прошло фильтрацию", "stage", "NegativeFilter", "value", data)
 					case <-done:
+						slog.Warn("Получен сигнал завершения во время отправки", "stage", "NegativeFilter")
 						return
 					}
+				} else {
+					slog.Debug("Число не прошло фильтрацию", "stage", "NegativeFilter", "value", data)
 				}
 			case <-done:
+				slog.Error("Стадия завершена по сигналу done", "stage", "NegativeFilter")
 				return
 			}
 		}
@@ -147,16 +171,25 @@ func NotDividedFilterStage(prevStage <-chan int, done <-chan struct{}) <-chan in
 			select {
 			case data, ok := <-prevStage:
 				if !ok {
+					slog.Warn("Канал предыдущей стадии закрыт", "stage", "NotDividedFilter")
 					return
 				}
+
+				slog.Debug("Получено число", "stage", "NotDividedFilter", "value", data)
+
 				if data != 0 && data%3 == 0 {
 					select {
 					case nextStage <- data:
+						slog.Info("Число прошло фильтрацию", "stage", "NotDividedFilter", "value", data)
 					case <-done:
+						slog.Warn("Получен сигнал завершения во время отправки", "stage", "NotDividedFilter")
 						return
 					}
+				} else {
+					slog.Debug("Число не прошло фильтрацию", "stage", "NotDividedFilter", "value", data)
 				}
 			case <-done:
+				slog.Error("Стадия завершена по сигналу done", "stage", "NotDividedFilter")
 				return
 			}
 		}
@@ -174,18 +207,23 @@ func BufferStage(prevStage <-chan int, done <-chan struct{}) <-chan int {
 		for {
 			select {
 			case <-time.After(bufferDrainInterval):
+				slog.Debug("Получение всех элементов в буфере", "stage", "Buffer")
 				bufferData := buffer.Get()
 				if len(bufferData) > 0 {
-					fmt.Println("Буфер сбрасывает данные", bufferData)
+					slog.Info("Буфер сбрасывает данные", "stage", "Buffer", "value", bufferData)
 					for _, data := range bufferData {
 						select {
 						case nextStage <- data:
 						case <-done:
+							slog.Warn("Получен сигнал завершения во время отправки", "stage", "Buffer")
 							return
 						}
 					}
+				} else {
+					slog.Debug("Буфер пуст", "stage", "Buffer")
 				}
 			case <-done:
+				slog.Error("Стадия завершена по сигналу done", "stage", "Buffer")
 				return
 			}
 		}
@@ -196,10 +234,14 @@ func BufferStage(prevStage <-chan int, done <-chan struct{}) <-chan int {
 			select {
 			case data, ok := <-prevStage:
 				if !ok {
+					slog.Warn("Канал предыдущей стадии закрыт", "stage", "Buffer")
 					return
 				}
+
 				buffer.Push(data)
+				slog.Debug("Добавлено в буфер", "stage", "Buffer", "value", data)
 			case <-done:
+				slog.Error("Стадия завершена по сигналу done", "stage", "Buffer")
 				return
 			}
 		}
@@ -225,6 +267,7 @@ func NewPipeLineInt(done <-chan struct{}, stages ...StageInt) *PipeLineInt {
 func (p *PipeLineInt) Run(source <-chan int) <-chan int {
 	var s <-chan int = source
 	for index := range p.stages {
+		slog.Debug("Запуск стадии", "number", index+1)
 		s = p.runStageInt(p.stages[index], s)
 	}
 	return s
